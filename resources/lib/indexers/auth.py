@@ -9,8 +9,8 @@ import os
 
 addon = xbmcaddon.Addon('plugin.video.selekt')
 
-def log(msg):
-    xbmc.log(f"SELEKT AUTH DEBUG: {msg}", xbmc.LOGINFO)
+def log(msg, level=xbmc.LOGINFO):
+    xbmc.log(f"SELEKT AUTH DEBUG: {msg}", level)
 
 PROFILE_DIR = xbmcvfs.translatePath(addon.getAddonInfo('profile'))
 if not xbmcvfs.exists(PROFILE_DIR):
@@ -28,10 +28,10 @@ def _logout():
         f = xbmcvfs.File(COOKIES_FILE, 'r')
         cookies_content = f.read()
         f.close()
-        
+
         if cookies_content:
             cookies = json.loads(cookies_content)
-            
+
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
                 "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8",
@@ -40,82 +40,105 @@ def _logout():
             }
 
             logout_url = 'https://hu.selekt.tv/api/logout?_data=routes%2Fapi.logout'
-            resp = requests.post(logout_url, cookies=cookies, headers=headers, timeout=10)
+            requests.post(logout_url, cookies=cookies, headers=headers, timeout=10)
     except Exception as e:
-        log(f"Hiba a kijelentkezés során (valószínűleg már lejárt): {str(e)}")
+        log(f"Hiba a kijelentkezés során (valószínűleg már lejárt): {str(e)}", xbmc.LOGWARNING)
 
     try:
         xbmcvfs.delete(COOKIES_FILE)
-    except:
-        pass
+    except Exception as e:
+        log(f"Cookie fájl törlése sikertelen: {e}", xbmc.LOGWARNING)
 
 def _login():
     _logout()
-    
+
     EMAIL = addon.getSetting('username')
     PASSWORD = addon.getSetting('password')
     if not EMAIL or not PASSWORD:
-        log("HIBA: Üres email vagy jelszó!")
+        log("HIBA: Üres email vagy jelszó!", xbmc.LOGERROR)
         return None
 
     session = requests.Session()
     session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/146.0.0.0",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         "Content-Type": "application/json"
     })
-    
+
     payload = {
-        "email": EMAIL, 
-        "password": PASSWORD, 
+        "email": EMAIL,
+        "password": PASSWORD,
         "encodedParams": h_f(h_r(_p_m)),
-        "registrationToken": None, 
+        "registrationToken": None,
         "selektProviderShortName": None
     }
-    
+
     try:
         resp = session.post('https://amc.prod.greendev.hu/api/get-auth-url', json=payload, timeout=15)
         if resp.status_code == 200:
             resp_data = resp.json()
             if resp_data.get("success"):
                 auth_url = resp_data.get("data")
-                session.get(auth_url, allow_redirects=True, timeout=15)
+                r2 = session.get(auth_url, allow_redirects=True, timeout=15)
                 cookies_dict = session.cookies.get_dict()
                 f = xbmcvfs.File(COOKIES_FILE, 'w')
                 f.write(json.dumps(cookies_dict))
                 f.close()
                 return cookies_dict
             else:
-                log(f"API hiba: {resp_data.get('errorMessage')}")
+                log(f"API hiba: {resp_data.get('errorMessage')}", xbmc.LOGERROR)
+        else:
+            log(f"Auth API nem 200: {resp.status_code}, body: {resp.text[:500]}", xbmc.LOGERROR)
     except Exception as e:
-        log(f"KRITIKUS HIBA a login során: {str(e)}")
+        log(f"KRITIKUS HIBA a login során: {str(e)}", xbmc.LOGERROR)
     return None
 
-def get(url):
-    cookies = {}
-    
+def _load_cookies():
     if not xbmcvfs.exists(COOKIES_FILE):
+        return None
+    try:
+        f = xbmcvfs.File(COOKIES_FILE, 'r')
+        content = f.read()
+        f.close()
+        if not content:
+            return None
+        cookies = json.loads(content)
+        return cookies
+    except Exception as e:
+        log(f"Cookie olvasási hiba: {e}", xbmc.LOGWARNING)
+        return None
+
+def _is_login_page(html):
+    has_remix = 'window.__remixContext' in html
+    has_react_router = 'window.__reactRouterContext' in html
+    has_root_div = '<div id="root">' in html
+    has_main_js = '/static/js/main.' in html
+
+    if has_remix or has_react_router:
+        return False
+    if has_root_div and has_main_js:
+        return True
+    if len(html) < 5000:
+        return True
+    return False
+
+def get(url):
+    cookies = _load_cookies()
+
+    if cookies is None:
         cookies = _login()
         if not cookies:
-            resp = requests.Response()
-            resp.status_code = 401
-            return resp
-    else:
-        try:
-            f = xbmcvfs.File(COOKIES_FILE, 'r')
-            content = f.read()
-            f.close()
-            cookies = json.loads(content)
-        except:
-            cookies = _login()
-            
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/146.0.0.0"}
-    
+            r = requests.Response()
+            r.status_code = 401
+            return r
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"}
+
     try:
-        resp = requests.get(url, cookies=cookies, headers=headers, timeout=15)
-        if resp.status_code in [401, 403]:
+        resp = requests.get(url, cookies=cookies, headers=headers, timeout=15, allow_redirects=True)
+        if resp.status_code in [401, 403] or _is_login_page(resp.text):
             cookies = _login()
             if cookies:
-                resp = requests.get(url, cookies=cookies, headers=headers, timeout=15)
+                resp = requests.get(url, cookies=cookies, headers=headers, timeout=15, allow_redirects=True)
         return resp
     except Exception as e:
         r = requests.Response()

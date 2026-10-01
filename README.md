@@ -3,4 +3,6 @@
 
 Kodi kiegészítő a SELEKT-hez
 
+1.0.1 - Lejátszás javítása
+
 1.0.0 - Első verzió
